@@ -1,6 +1,7 @@
 # data
 data/
 .DS_Store
+config.yaml
 
 # model
 xlm-roberta*/

@@ -3,13 +3,15 @@ import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 
-from transformers import XLMRobertaModel
-from transformers import Wav2Vec2PreTrainedModel
-
 from transformers import Wav2Vec2Model
+from transformers import Wav2Vec2PreTrainedModel
+from transformers import AutoModel, XLMRobertaModel
 
-from .layer import SelfAttention
+from .layer import SelfAttention, MultiModalMixer
 
+#################################################################
+################         Uni Modal (Wav)         ################
+#################################################################
 class Wav2Vec2ClassificationHead(nn.Module):
     """Head for wav2vec classification task."""
 
@@ -84,6 +86,9 @@ class Wav2Vec2ForSpeechClassification(Wav2Vec2PreTrainedModel):
         return logits
 
 
+#################################################################
+################        Uni Modal (text)         ################
+#################################################################
 class xlm_RoBertaBase(XLMRobertaModel):
     def __init__(self, config):
         super(xlm_RoBertaBase, self).__init__(config)
@@ -100,6 +105,9 @@ class xlm_RoBertaBase(XLMRobertaModel):
         return logits
 
 
+#################################################################
+################        Multi Modal (Wav)        ################
+#################################################################
 class MultiModalClassificationHead(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -107,7 +115,7 @@ class MultiModalClassificationHead(nn.Module):
         self.multimodal_method = config.multimodal_method
         self.num_classes = config.rnn_config.num_classes
 
-        if self.multimodal_method=='base':
+        if self.multimodal_method=='early_fusion':
             concat_size = config.wav_config.hidden_size + config.rnn_config.hidden_size
             self.norm = nn.LayerNorm(concat_size)
             self.classifier = nn.Linear(concat_size, self.num_classes)
@@ -117,13 +125,13 @@ class MultiModalClassificationHead(nn.Module):
             self.text_classifier = nn.Linear(config.rnn_config.hidden_size, self.num_classes)
             self.norm = nn.LayerNorm(self.num_classes)
 
-        elif self.multimodal_method=='stacking':
+        elif self.multimodal_method=='stack':
             concat_size = config.wav_config.hidden_size + config.rnn_config.hidden_size
             self.norm = nn.LayerNorm(concat_size)
             self.dropouts = nn.ModuleList([nn.Dropout(0.5) for _ in range(5)])
             self.classifier = nn.Linear(concat_size, self.num_classes)
 
-        elif self.multimodal_method=='residuals':
+        elif self.multimodal_method=='residual':
             concat_size = config.wav_config.hidden_size + config.rnn_config.hidden_size
             self.norm = nn.LayerNorm(concat_size)
             self.res_block = nn.Sequential(
@@ -138,7 +146,7 @@ class MultiModalClassificationHead(nn.Module):
             )
             self.classifier = nn.Linear(concat_size, self.num_classes)
             
-        elif self.multimodal_method=='residuals_attn':
+        elif self.multimodal_method=='rsa':
             concat_size = config.wav_config.hidden_size + config.rnn_config.hidden_size
             self.attn = SelfAttention(1, 256)
             self.norm = nn.LayerNorm(concat_size)
@@ -241,8 +249,11 @@ class MultiModalClassificationHead(nn.Module):
             
             self.hybrid_norm = nn.LayerNorm(self.num_classes)
 
+        elif self.multimodal_method=='mlp_mixer':
+            self.mixer_layer = MultiModalMixer()
+            
     def forward(self, wav_vec, rnn_vec):
-        if self.multimodal_method=='base':
+        if self.multimodal_method=='early_fusion':
             x = torch.cat([wav_vec, rnn_vec], dim=1)
             x = self.norm(x)
             outputs = self.classifier(x)
@@ -253,7 +264,7 @@ class MultiModalClassificationHead(nn.Module):
             outputs = self.norm(torch.stack([wave_output, text_output], dim=1))
             outputs = torch.mean(outputs, dim=1)
             
-        elif self.multimodal_method=='stacking':
+        elif self.multimodal_method=='stack':
             x = torch.cat([wav_vec, rnn_vec], dim=1)
             x = self.norm(x)
             for i, dropout in enumerate(self.dropouts):
@@ -263,8 +274,8 @@ class MultiModalClassificationHead(nn.Module):
                     outputs += self.classifier(dropout(x))
             else:
                 outputs /= len(self.dropouts)
-
-        elif self.multimodal_method=='residuals':
+            
+        elif self.multimodal_method=='residual':
             x = torch.cat([wav_vec, rnn_vec], dim=1)
             x = self.norm(x)
 
@@ -273,10 +284,8 @@ class MultiModalClassificationHead(nn.Module):
 
             res2 = self.res_block2(res_concat)
             outputs = self.classifier(x + res2)
-
-            return outputs
         
-        elif self.multimodal_method=='residuals_attn':
+        elif self.multimodal_method=='rsa':
             x = torch.cat([wav_vec, rnn_vec], dim=1)
             x = self.norm(x)
 
@@ -309,10 +318,7 @@ class MultiModalClassificationHead(nn.Module):
             res_concat = torch.cat([cross_fusion, res], dim=1)
 
             res2 = self.res_block2(res_concat)
-            outputs = self.classifier(cross_fusion + res2)
-
-            return outputs
-        
+            outputs = self.classifier(cross_fusion + res2)        
 
         elif self.multimodal_method=='hybrid_fusion':
             bs = wav_vec.size()[0]
@@ -337,8 +343,8 @@ class MultiModalClassificationHead(nn.Module):
             wav_vec_proj = self.wav_proj(wav_vec)
             rnn_vec_proj = self.rnn_proj(rnn_vec)
             
-            wav_vec = self.wav_norm(self.wave_attn(wav_vec_proj) + wav_vec_proj)
-            rnn_vec = self.rnn_norm(self.text_attn(rnn_vec_proj) + rnn_vec_proj)
+            wav_vec = self.wav_norm(self.wave_attn(wav_vec_proj)[0] + wav_vec_proj)
+            rnn_vec = self.rnn_norm(self.text_attn(rnn_vec_proj)[0] + rnn_vec_proj)
             
             _wav = torch.cat((
                 Variable(torch.ones(bs, 1).type(wav_vec.dtype).to(wav_vec.device), requires_grad=False), wav_vec), dim=1)
@@ -356,12 +362,14 @@ class MultiModalClassificationHead(nn.Module):
             # soft voting
             outputs = self.hybrid_norm(torch.stack([base_outputs, lf_outputs, res_outputs, rac_outputs], dim=1))
             outputs = torch.mean(outputs, dim=1)
-
+            
+        elif self.multimodal_method=='mlp_mixer':
+            outputs = self.mixer_layer(wav_vec, rnn_vec)
+            
         return outputs
 
-
 class MultiModel(nn.Module):
-    """wav2vec2, Roberta Multi Modal"""
+    """wav2vec, text Multi Modal Model"""
     def __init__(self, config):
         super().__init__()
 
@@ -369,8 +377,9 @@ class MultiModel(nn.Module):
         if 'xlm' in config.rnn_model:
             self.rnn_model = XLMRobertaModel.from_pretrained(config.rnn_model, config=config.rnn_config)
         else:
-            from transformers import AutoModel
             self.rnn_model = AutoModel.from_pretrained(config.rnn_model, config=config.rnn_config)
+        
+        self.multimodal_method = config.multimodal_method
         self.classifier = MultiModalClassificationHead(config)
 
     def wav_freeze_feature_extractor(self):
@@ -378,13 +387,18 @@ class MultiModel(nn.Module):
 
     def forward(self, input_values, input_ids, attention_mask, token_type_ids):
 
-        wav_vec = torch.mean(
-            self.wav_model(input_values)[0],
-            dim=1)
-        rnn_vec = torch.mean(
-            self.rnn_model(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)['last_hidden_state'],
-            dim=1)
-
+        if self.multimodal_method != 'mlp_mixer':
+            wav_vec = torch.mean(
+                self.wav_model(input_values)[0],
+                dim=1)
+            rnn_vec = torch.mean(
+                self.rnn_model(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)['last_hidden_state'],
+                dim=1)
+        else:
+            wav_vec = self.wav_model(input_values)[0]
+            rnn_vec = self.rnn_model(input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)['last_hidden_state']
+            
         outputs = self.classifier(wav_vec, rnn_vec)
 
         return outputs
+    

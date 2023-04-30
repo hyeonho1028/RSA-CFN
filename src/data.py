@@ -5,8 +5,8 @@ from tqdm import tqdm
 import pandas as pd
 import numpy as np
 
-def data_load(data_path='data/KEMDy20_v1_1/', use_wav=False):
-    use_wav=True
+# Load data from KEMDy20_v1_1 as dataframe
+def data_load(data_path='data/KEMDy20_v1_1/'):
     
     target_sampling_rate = 16000
     cols = ['Number', 'Wav_start', 'Wav_end', 'Segment ID', 'Emotion', 'Valence', 'Arousal']
@@ -31,14 +31,10 @@ def data_load(data_path='data/KEMDy20_v1_1/', use_wav=False):
             text = pd.read_csv(text_path, encoding='cp949').columns[0]
             s_id_ls += [text]
             
-            if use_wav:
-                # try:
-                    speech_array, sampling_rate = sf.read(wav_path)
-                    resampler = torchaudio.transforms.Resample(sampling_rate, target_sampling_rate)
-                    speech_array = resampler(speech_array).squeeze()
-                    s_id_wav_ls += [[speech_array, sampling_rate]]
-                # except:
-                #     s_id_wav_ls += [[np.nan, np.nan]]
+            speech_array, sampling_rate = sf.read(wav_path)
+            resampler = torchaudio.transforms.Resample(sampling_rate, target_sampling_rate)
+            speech_array = resampler(speech_array).squeeze()
+            s_id_wav_ls += [[speech_array, sampling_rate]]
 
         else:
             tmp['text'] = s_id_ls

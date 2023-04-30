@@ -10,11 +10,12 @@ from typing import Any, Dict, List, Optional, Union
 from transformers import Wav2Vec2FeatureExtractor
 
 class Custom_Dataset(Dataset):
-    def __init__(self, df, tokenizer=None, feature_extractor=None):
+    def __init__(self, args, df, tokenizer=None, feature_extractor=None):
         self.text = df['text']
         self.wav = df['speech_array'].values.tolist()
         self.target_sampling_rate = 16000
         self.labels = df['Emotion']
+        self.text_max_length = args.text_max_lens
         self.tokenizer = tokenizer
         
         self.feature_extractor = feature_extractor(self.wav, sampling_rate=self.target_sampling_rate)

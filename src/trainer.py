@@ -13,10 +13,11 @@ from torch.utils.data.sampler import RandomSampler, SequentialSampler, WeightedR
 
 from sklearn.metrics import f1_score
 
+# sharing model forward
 def sharing_step(args, model, batch):
     attn_w = None
     if args.use_concat:
-        if args.multimodal_method=='residuals_attn':
+        if args.multimodal_method=='rsa':
             pred, attn_w = model(batch['input_values'], 
                                  batch['tokenized_input_ids'], 
                                  batch['tokenized_attention_mask'], 
@@ -37,8 +38,22 @@ def sharing_step(args, model, batch):
     return pred, attn_w
 
 
+# training function
 def training(args):
-    # model, optimizer, criterion
+    '''
+    [description]
+    function for training
+    After training, save model and bin-count of result.
+
+    [args]
+    args: argparse object
+        args must have following attributes:
+            - train_dataset
+            - valid_dataset
+
+    [return]
+    None
+    '''
     
     if args.batch_weighted_sampler:
         samples_weight = torch.from_numpy(args.samples_weight)
@@ -109,14 +124,14 @@ def training(args):
             batch = {k: v.to(args.device) for k, v in batch.items()}
             if args.use_amp:
                 with torch.cuda.amp.autocast():
-                    pred = sharing_step(args, model, batch)[0]
+                    pred, _ = sharing_step(args, model, batch)
                 
                     loss = criterion(pred, batch['labels'])
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
             else:
-                pred = sharing_step(args, model, batch)[0]
+                pred, _ = sharing_step(args, model, batch)
                 
                 loss = criterion(pred, batch['labels'])
                 loss.backward()
@@ -128,9 +143,6 @@ def training(args):
             train_loss += loss.item()
             bar.set_description('loss : % 5f' % (loss.item()))
 
-            # if idx==2:
-            #     break
-
         train_loss /= idx
         train_preds, train_labels = np.concatenate(train_preds), np.concatenate(train_labels).reshape(-1)
         train_f1 = f1_score(train_labels, np.argmax(train_preds, 1), average='weighted')
@@ -140,12 +152,12 @@ def training(args):
         valid_loss = valids['val_loss']
         valid_f1 = valids['val_f1']
 
-        # train log & model save
+        # print train log & model save
         content = f'EPOCH : {epoch+1}, train_loss : {train_loss:.5f}, valid_loss : {valid_loss:.5f}, train_f1 : {train_f1:.5f}, valid_f1 : {valid_f1:.5f}'
-        
         print(content)
         print(pd.Series(valid_preds).value_counts())
-            
+        
+        # save checkpoint & logger
         if total_valid_f1<valid_f1:
             os.makedirs(args.output_dir + args.ver, exist_ok=True)
             
@@ -166,7 +178,7 @@ def training(args):
             model_path = args.output_dir + args.ver + f'/{model_path}.pth'
             torch.save(model.state_dict(), model_path)
             
-            if args.multimodal_method=='residuals_attn':
+            if args.multimodal_method=='rsa':
                 np.save(f'{args.output_dir}{args.ver}/attn_weights.npy', valids['attn_weights'])
         else:    
             with open(f'{args.output_dir}{args.ver}/log.txt', 'a') as appender:
@@ -175,8 +187,7 @@ def training(args):
                 appender.write(str(pd.Series(valid_preds).value_counts()) + '\n')
                 appender.write('#################################################################' + '\n')
             
-            
-            
+# validaion func
 def valid_fn(args, valid_dataloader, model, criterion):
     
     model.eval()
@@ -202,7 +213,7 @@ def valid_fn(args, valid_dataloader, model, criterion):
             valid_preds += [pred.clone().detach().cpu()]
             valid_labels += [batch['labels'].clone().detach().cpu()]
             
-            if args.multimodal_method=='residuals_attn':
+            if args.multimodal_method=='rsa':
                 attn_weights += [attn_w.clone().detach().cpu().numpy()]
 
             valid_loss += loss.item()
@@ -213,8 +224,8 @@ def valid_fn(args, valid_dataloader, model, criterion):
     valid_preds, valid_labels = np.concatenate(valid_preds), np.concatenate(valid_labels).reshape(-1)    
     valid_preds = np.argmax(valid_preds, 1)
     
-    if args.multimodal_method=='residuals_attn':
-        attn_weights = np.mean(np.mean(attn_weights, 0), 0)
+    if args.multimodal_method=='rsa':
+        attn_weights = np.mean(np.mean(attn_weights, axis=0), axis=0)
     
     f1 = f1_score(valid_labels, valid_preds, average='weighted')
     valids = {  
