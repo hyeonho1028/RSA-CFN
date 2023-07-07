@@ -1,7 +1,7 @@
 # Residual Self-Attention Cross Fusion Network (RSA-CFN)
 ## Introduction
 This repository contains the code for the paper [Residual Self-Attention Cross Fusion Network] submitted to [2023 HumanUnderstanding AI Paper Competition](https://aifactory.space/competition/detail/2234)
-
+> Paper : [20-727.pdf](https://github.com/hyeonho1028/RSA-CFN/files/11973717/20-727.pdf)
 > Autors: [@hyeonho1028](https://github.com/hyeonho1028),[@zerojin91](https://github.com/zerojin91), [@aibjw](https://github.com/aibjw)
 
 ## Environment
